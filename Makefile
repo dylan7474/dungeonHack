@@ -1,6 +1,6 @@
 # Makefile for Linux
 CC = gcc
-TARGET = moria_crawler
+TARGET = dungeonHack
 SRCS = main.c
 CFLAGS = -Wall -O2 `sdl2-config --cflags`
 LDFLAGS = `sdl2-config --libs` -lSDL2_ttf
