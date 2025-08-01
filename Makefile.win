@@ -1,6 +1,6 @@
 # Makefile for Windows (Cross-Compilation)
 CC = x86_64-w64-mingw32-gcc
-TARGET = moria_crawler.exe
+TARGET = dungeonHack.exe
 SRCS = main.c
 CFLAGS = -I/usr/x86_64-w64-mingw32/include/SDL2 \
          -I/usr/x86_64-w64-mingw32/include \
