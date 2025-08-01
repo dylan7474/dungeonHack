@@ -193,6 +193,20 @@ int main(int argc, char* args[]) {
         if (player.hp <= 0 && gameState != STATE_GAMEOVER) {
             gameState = STATE_GAMEOVER;
         }
+        
+        // Win condition: dungeon level 5 and the boss is defeated
+        if (dungeonLevel >= 5) {
+            int bossIsAlive = 0;
+            for (int i = 0; i < MAX_MONSTERS; i++) {
+                if (monsters[i].active && strcmp(monsters[i].name, "Lich Lord") == 0) {
+                    bossIsAlive = 1;
+                    break;
+                }
+            }
+            if (!bossIsAlive && gameState != STATE_WIN) {
+                gameState = STATE_WIN;
+            }
+        }
 
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
