@@ -924,7 +924,6 @@ void eatFood() {
 
 // Check if player has enough XP to level up
 void checkLevelUp() {
-    char tempBuffer[256];
     if (player.xp >= player.xpToNextLevel) {
         player.level++;
         player.xp -= player.xpToNextLevel; // Reset XP for the new level
