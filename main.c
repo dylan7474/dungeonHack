@@ -1,5 +1,6 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
+#include <SDL2/SDL_mixer.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -33,6 +34,14 @@ typedef struct {
     int intelligence;
     int score; // Player's score
     int healthPotions; // Number of health potions
+    int level; // Player's level
+    int xp;    // Player's experience points
+    int xpToNextLevel; // XP required for the next level
+    int hunger; // Hunger level
+    int visibilityRadius; // Radius of visibility
+    int foodInInventory; // Food in inventory
+    char causeOfDeath[30]; // What killed the player
+    int isStarving; // Flag to prevent repeated starving messages/sounds
 } Player;
 
 // Monster attributes
@@ -57,7 +66,8 @@ typedef enum {
     STATE_PLAYING,
     STATE_HELP,
     STATE_GAMEOVER,
-    STATE_WIN
+    STATE_WIN,
+    STATE_LEVELUP
 } GameState;
 
 // Monster templates with scoring
@@ -88,6 +98,9 @@ GameState gameState = STATE_PLAYING;
 int isAwaitingSpellDirection = 0; // New flag for magic missile
 int dungeonLevel = 1;
 
+// Fog of War variables
+int visibility[MAP_HEIGHT][MAP_WIDTH];
+
 // Camera/Viewport position
 int cameraX = 0;
 int cameraY = 0;
@@ -97,6 +110,23 @@ SDL_Window* window = NULL;
 SDL_Renderer* renderer = NULL;
 TTF_Font* font = NULL;
 SDL_Color textColor = {255, 255, 255, 255}; // White color
+
+// Sound variables
+Mix_Chunk* beepSound = NULL;
+unsigned char beep_raw_data[] = {
+    // A simple 440 Hz square wave for 0.5 seconds
+    // This is just a placeholder, you can replace it with any raw audio data
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+unsigned int beep_raw_data_len = 128;
+
 
 // Function prototypes
 void initSDL();
@@ -117,10 +147,16 @@ void renderGame();
 void renderGameOverScreen();
 void renderHelpScreen();
 void renderWinScreen();
+void renderLevelUpScreen();
 void drawText(const char* text, int x, int y, SDL_Color color);
 void showMessage(const char* message);
 int getDistance(int x1, int y1, int x2, int y2);
 int isOccupiedByMonster(int x, int y);
+void checkLevelUp();
+void updateVisibility();
+void placePotions();
+void placeFood();
+void eatFood();
 
 int main(int argc, char* args[]) {
     initSDL();
@@ -134,10 +170,22 @@ int main(int argc, char* args[]) {
     player.intelligence = 5;
     player.score = 0;
     player.healthPotions = 0;
+    player.level = 1;
+    player.xp = 0;
+    player.xpToNextLevel = 100;
+    player.hunger = 0;
+    player.visibilityRadius = 8; // Default visibility radius
+    player.foodInInventory = 10; // Start with 10 food items
+    strcpy(player.causeOfDeath, "");
+    player.isStarving = 0;
 
     // Generate the initial dungeon and place monsters
     generateDungeon();
     placeMonsters();
+    updateVisibility();
+    
+    // Disable key repeat
+    // SDL_EnableKeyRepeat(0, 0);
 
     int running = 1;
     SDL_Event e;
@@ -158,6 +206,10 @@ int main(int argc, char* args[]) {
                     playerTurnPassed = handlePlayingInput(&e);
                 } else if (gameState == STATE_HELP) {
                     // Handled in the main loop for now, but good to have a dedicated function
+                } else if (gameState == STATE_LEVELUP) {
+                    // The level up screen is a brief pause, so we can handle input
+                    // to dismiss it here, or just let the delay run out.
+                    // For now, let the delay handle it.
                 }
             }
         }
@@ -173,6 +225,19 @@ int main(int argc, char* args[]) {
                         memset(messageBuffer, 0, sizeof(messageBuffer));
                     }
                 }
+                
+                // Hunger mechanic
+                player.hunger++;
+                if (player.hunger >= 200) {
+                    player.hp--;
+                    if (player.isStarving == 0) {
+                        Mix_PlayChannel(-1, beepSound, 0); // Play beep once
+                        showMessage("You are starving!");
+                        player.isStarving = 1;
+                    }
+                } else {
+                    player.isStarving = 0; // Reset starving flag
+                }
 
                 // Passive regeneration
                 turnCounter++;
@@ -185,6 +250,9 @@ int main(int argc, char* args[]) {
                     }
                     turnCounter = 0;
                 }
+                
+                checkLevelUp(); // Check for level up after every turn
+                updateVisibility(); // Update visibility after every turn
             }
             playerTurnPassed = 0; // Reset flag
         }
@@ -192,6 +260,7 @@ int main(int argc, char* args[]) {
         // Check for game over or win condition
         if (player.hp <= 0 && gameState != STATE_GAMEOVER) {
             gameState = STATE_GAMEOVER;
+            strcpy(player.causeOfDeath, "starvation");
         }
         
         // Win condition: dungeon level 5 and the boss is defeated
@@ -217,6 +286,11 @@ int main(int argc, char* args[]) {
                 break;
             case STATE_HELP:
                 renderHelpScreen();
+                break;
+            case STATE_LEVELUP:
+                renderLevelUpScreen();
+                SDL_Delay(2000);
+                gameState = STATE_PLAYING;
                 break;
             case STATE_GAMEOVER:
                 renderGameOverScreen();
@@ -278,12 +352,27 @@ void initSDL() {
         exit(1);
     }
 
+    // Initialize SDL_mixer for sound
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+        printf("SDL_mixer could not initialize! Mix_Error: %s\n", Mix_GetError());
+    }
+
+    // Load sound from embedded data
+    SDL_RWops* rwBeep = SDL_RWFromConstMem(beep_raw_data, beep_raw_data_len);
+    beepSound = Mix_LoadWAV_RW(rwBeep, 1);
+    if (beepSound == NULL) {
+        printf("Failed to load beep sound! Mix_Error: %s\n", Mix_GetError());
+    }
+
     // Initialize message buffer
     memset(messageBuffer, 0, sizeof(messageBuffer));
 }
 
 // Clean up SDL resources
 void closeSDL() {
+    Mix_FreeChunk(beepSound);
+    beepSound = NULL;
+    Mix_Quit();
     TTF_CloseFont(font);
     font = NULL;
     SDL_DestroyRenderer(renderer);
@@ -346,13 +435,24 @@ void generateDungeon() {
         player.y = MAP_HEIGHT / 2;
         map[player.y][player.x] = '.';
     }
-
+    
+    // Place potions and food
+    placePotions();
+    placeFood();
+    
     // Place stairs down if not the final level
     if (numRooms > 1 && dungeonLevel < 5) {
         int lastRoomIndex = numRooms - 1;
         int stairsX = rooms[lastRoomIndex].x + rooms[lastRoomIndex].width / 2;
         int stairsY = rooms[lastRoomIndex].y + rooms[lastRoomIndex].height / 2;
         map[stairsY][stairsX] = '>';
+    }
+    
+    // Initialize visibility map
+    for (int y = 0; y < MAP_HEIGHT; y++) {
+        for (int x = 0; x < MAP_WIDTH; x++) {
+            visibility[y][x] = 0;
+        }
     }
 }
 
@@ -453,6 +553,36 @@ void placeMonsters() {
     }
 }
 
+// Place potions on the floor
+void placePotions() {
+    if (rand() % 3 == 0) { // 33% chance to place a potion on a new level
+        int placed = 0;
+        while(!placed) {
+            int x = rand() % MAP_WIDTH;
+            int y = rand() % MAP_HEIGHT;
+            if (map[y][x] == '.' && (x != player.x || y != player.y)) {
+                map[y][x] = '!'; // Potion symbol
+                placed = 1;
+            }
+        }
+    }
+}
+
+// Place food on the floor
+void placeFood() {
+    if (rand() % 2 == 0) { // 50% chance to place food on a new level
+        int placed = 0;
+        while(!placed) {
+            int x = rand() % MAP_WIDTH;
+            int y = rand() % MAP_HEIGHT;
+            if (map[y][x] == '.' && (x != player.x || y != player.y)) {
+                map[y][x] = 'F'; // Food symbol
+                placed = 1;
+            }
+        }
+    }
+}
+
 // Handle player input for playing state
 int handlePlayingInput(SDL_Event* e) {
     if (e->type == SDL_KEYDOWN) {
@@ -477,22 +607,37 @@ int handlePlayingInput(SDL_Event* e) {
         
         int newX = player.x;
         int newY = player.y;
+        int playerMoved = 0;
 
         switch (e->key.keysym.sym) {
             case SDLK_UP:
-                newY--;
+                // Only process movement if not starving or if a new key is pressed
+                if (player.isStarving == 0 || e->key.repeat == 0) {
+                    newY--;
+                    playerMoved = 1;
+                }
                 break;
             case SDLK_DOWN:
-                newY++;
+                if (player.isStarving == 0 || e->key.repeat == 0) {
+                    newY++;
+                    playerMoved = 1;
+                }
                 break;
             case SDLK_LEFT:
-                newX--;
+                if (player.isStarving == 0 || e->key.repeat == 0) {
+                    newX--;
+                    playerMoved = 1;
+                }
                 break;
             case SDLK_RIGHT:
-                newX++;
+                if (player.isStarving == 0 || e->key.repeat == 0) {
+                    newX++;
+                    playerMoved = 1;
+                }
                 break;
             case SDLK_r: // New rest functionality
                 rest();
+                player.hunger += 5; // Resting makes you hungrier
                 return 1; // A turn has passed
             case SDLK_h: // Heal spell
                 castHealSpell();
@@ -501,6 +646,9 @@ int handlePlayingInput(SDL_Event* e) {
                 isAwaitingSpellDirection = 1;
                 showMessage("Choose a direction for magic missile!");
                 return 0; // No turn passed yet
+            case SDLK_e: // Eat food
+                eatFood();
+                return 1;
             case SDLK_p: // Use health potion
                 useHealthPotion();
                 return 1;
@@ -511,36 +659,52 @@ int handlePlayingInput(SDL_Event* e) {
                 return 0; // No action taken
         }
 
-        // Check if the new position is a floor tile and not a wall
-        if (newX >= 0 && newX < MAP_WIDTH && newY >= 0 && newY < MAP_HEIGHT && map[newY][newX] != '#') {
-            
-            // Check for stairs
-            if (map[newY][newX] == '>') {
-                dungeonLevel++;
-                generateDungeon();
-                placeMonsters();
-                showMessage("You descend to a new level!");
-                return 1;
-            }
-
-            // Check for a monster in the new position
-            int monsterIndex = -1;
-            for (int i = 0; i < MAX_MONSTERS; i++) {
-                if (monsters[i].active && monsters[i].x == newX && monsters[i].y == newY) {
-                    monsterIndex = i;
-                    break;
+        if (playerMoved) {
+            // Check if the new position is a floor tile and not a wall
+            if (newX >= 0 && newX < MAP_WIDTH && newY >= 0 && newY < MAP_HEIGHT && map[newY][newX] != '#') {
+                
+                // Check for stairs
+                if (map[newY][newX] == '>') {
+                    dungeonLevel++;
+                    generateDungeon();
+                    placeMonsters();
+                    showMessage("You descend to a new level!");
+                    return 1;
                 }
-            }
+                
+                // Check for potion
+                if (map[newY][newX] == '!') {
+                    player.healthPotions++;
+                    map[newY][newX] = '.';
+                    showMessage("You found a health potion!");
+                }
+                
+                // Check for food
+                if (map[newY][newX] == 'F') {
+                    player.foodInInventory++;
+                    map[newY][newX] = '.';
+                    showMessage("You found some food!");
+                }
 
-            if (monsterIndex != -1) {
-                // Monster found, initiate combat
-                fightMonster(monsterIndex);
-                return 1; // A turn has passed
-            } else {
-                // No monster, move the player
-                player.x = newX;
-                player.y = newY;
-                return 1; // A turn has passed
+                // Check for a monster in the new position
+                int monsterIndex = -1;
+                for (int i = 0; i < MAX_MONSTERS; i++) {
+                    if (monsters[i].active && monsters[i].x == newX && monsters[i].y == newY) {
+                        monsterIndex = i;
+                        break;
+                    }
+                }
+
+                if (monsterIndex != -1) {
+                    // Monster found, initiate combat
+                    fightMonster(monsterIndex);
+                    return 1; // A turn has passed
+                } else {
+                    // No monster, move the player
+                    player.x = newX;
+                    player.y = newY;
+                    return 1; // A turn has passed
+                }
             }
         }
     }
@@ -570,13 +734,13 @@ void moveMonsters() {
                     // Prioritize movement on the axis with the greater distance
                     if (abs(dx) > abs(dy)) {
                         newX += (dx > 0) ? 1 : -1;
-                        if (map[newY][newX] == '.' && (newX != player.x || newY != player.y) && isOccupiedByMonster(newX, newY) == -1) {
+                        if (map[newY][newX] != '#' && (newX != player.x || newY != player.y) && isOccupiedByMonster(newX, newY) == -1) {
                             monsters[i].x = newX;
                             moved = 1;
                         }
                     } else {
                         newY += (dy > 0) ? 1 : -1;
-                        if (map[newY][newX] == '.' && (newX != player.x || newY != player.y) && isOccupiedByMonster(newX, newY) == -1) {
+                        if (map[newY][newX] != '#' && (newX != player.x || newY != player.y) && isOccupiedByMonster(newX, newY) == -1) {
                             monsters[i].y = newY;
                             moved = 1;
                         }
@@ -586,12 +750,12 @@ void moveMonsters() {
                     if (!moved) {
                         if (abs(dx) > abs(dy)) {
                             newY = monsters[i].y + ((dy > 0) ? 1 : -1);
-                            if (map[newY][monsters[i].x] == '.' && (monsters[i].x != player.x || newY != player.y) && isOccupiedByMonster(monsters[i].x, newY) == -1) {
+                            if (map[newY][monsters[i].x] != '#' && (monsters[i].x != player.x || newY != player.y) && isOccupiedByMonster(monsters[i].x, newY) == -1) {
                                 monsters[i].y = newY;
                             }
                         } else {
                             newX = monsters[i].x + ((dx > 0) ? 1 : -1);
-                            if (map[monsters[i].y][newX] == '.' && (newX != player.x || monsters[i].y != player.y) && isOccupiedByMonster(newX, monsters[i].y) == -1) {
+                            if (map[monsters[i].y][newX] != '#' && (newX != player.x || monsters[i].y != player.y) && isOccupiedByMonster(newX, monsters[i].y) == -1) {
                                 monsters[i].x = newX;
                             }
                         }
@@ -613,18 +777,23 @@ void fightMonster(int monsterIndex) {
 
     if (monsters[monsterIndex].hp <= 0) {
         player.score += monsters[monsterIndex].points;
-        // 50% chance to drop a health potion
+        player.xp += monsters[monsterIndex].points; // Gain XP for defeating a monster
+        
+        // 50% chance to drop a food item
         if (rand() % 2 == 0) {
-            player.healthPotions++;
-            sprintf(tempBuffer, "You defeated the %s and found a Health Potion!", monsters[monsterIndex].name);
+            player.foodInInventory++;
+            sprintf(tempBuffer, "You defeated the %s and found some food!", monsters[monsterIndex].name);
         } else {
             sprintf(tempBuffer, "You defeated the %s!", monsters[monsterIndex].name);
         }
         monsters[monsterIndex].active = 0;
         showMessage(tempBuffer);
     } else {
-        int monsterDamage = rand() % 5 + 1; // Monsters do 1-5 damage
+        int monsterDamage = rand() % (5 + dungeonLevel) + 1; // Monsters do 1-5 damage + dungeon level
         player.hp -= monsterDamage;
+        if (player.hp <= 0) {
+            strcpy(player.causeOfDeath, monsters[monsterIndex].name);
+        }
         sprintf(tempBuffer, "The %s hits you for %d damage! Your HP is now %d/%d.", monsters[monsterIndex].name, monsterDamage, player.hp, player.maxHp);
         showMessage(tempBuffer);
     }
@@ -702,13 +871,9 @@ void castMagicMissile(int dx, int dy) {
             sprintf(tempBuffer, "You cast magic missile at the %s for %d damage!", monsters[monsterIndex].name, damage);
             if (monsters[monsterIndex].hp <= 0) {
                 player.score += monsters[monsterIndex].points;
-                // 50% chance to drop a health potion
-                if (rand() % 2 == 0) {
-                    player.healthPotions++;
-                    sprintf(tempBuffer, "You defeated the %s and found a Health Potion!", monsters[monsterIndex].name);
-                } else {
-                    sprintf(tempBuffer, "You defeated the %s!", monsters[monsterIndex].name);
-                }
+                player.xp += monsters[monsterIndex].points; // Gain XP for defeating a monster
+                
+                sprintf(tempBuffer, "You defeated the %s!", monsters[monsterIndex].name);
                 monsters[monsterIndex].active = 0;
             }
             break;
@@ -744,6 +909,46 @@ void useHealthPotion() {
     showMessage(tempBuffer);
 }
 
+// New function to eat food
+void eatFood() {
+    char tempBuffer[256];
+    if (player.foodInInventory > 0) {
+        player.foodInInventory--;
+        player.hunger = 0;
+        sprintf(tempBuffer, "You eat the food and are no longer hungry!");
+    } else {
+        sprintf(tempBuffer, "You have no food!");
+    }
+    showMessage(tempBuffer);
+}
+
+// Check if player has enough XP to level up
+void checkLevelUp() {
+    char tempBuffer[256];
+    if (player.xp >= player.xpToNextLevel) {
+        player.level++;
+        player.xp -= player.xpToNextLevel; // Reset XP for the new level
+        player.xpToNextLevel = player.xpToNextLevel + (player.level * 50); // Increase XP required for the next level
+        player.maxHp += 5; // Increase max HP
+        player.hp = player.maxHp; // Fully heal on level up
+        player.maxMana += 2; // Increase max Mana
+        player.mana = player.maxMana; // Fully restore mana
+        player.intelligence++; // Increase intelligence
+        
+        gameState = STATE_LEVELUP;
+    }
+}
+
+// Update the visibility map based on the player's position
+void updateVisibility() {
+    for (int y = 0; y < MAP_HEIGHT; y++) {
+        for (int x = 0; x < MAP_WIDTH; x++) {
+            if (getDistance(player.x, player.y, x, y) <= player.visibilityRadius) {
+                visibility[y][x] = 1;
+            }
+        }
+    }
+}
 
 // Render the game state to the screen
 void renderGame() {
@@ -774,20 +979,32 @@ void renderGame() {
             int mapX = cameraX + x;
             int mapY = cameraY + y;
             if (mapX >= 0 && mapX < MAP_WIDTH && mapY >= 0 && mapY < MAP_HEIGHT) {
-                char tileChar[2];
-                tileChar[0] = map[mapY][mapX];
-                tileChar[1] = '\0';
+                if (visibility[mapY][mapX]) {
+                    char tileChar[2];
+                    tileChar[0] = map[mapY][mapX];
+                    tileChar[1] = '\0';
 
-                // Set color based on tile type
-                if (map[mapY][mapX] == '#') {
-                    SDL_Color wallColor = {100, 100, 100, 255}; // Gray for walls
-                    drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, wallColor);
-                } else if (map[mapY][mapX] == '>') {
-                    SDL_Color stairsColor = {255, 255, 0, 255}; // Yellow for stairs
-                    drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, stairsColor);
+                    // Set color based on tile type
+                    if (map[mapY][mapX] == '#') {
+                        SDL_Color wallColor = {100, 100, 100, 255}; // Gray for walls
+                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, wallColor);
+                    } else if (map[mapY][mapX] == '>') {
+                        SDL_Color stairsColor = {255, 255, 0, 255}; // Yellow for stairs
+                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, stairsColor);
+                    } else if (map[mapY][mapX] == '!') {
+                        SDL_Color potionColor = {0, 255, 255, 255}; // Cyan for potions
+                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, potionColor);
+                    } else if (map[mapY][mapX] == 'F') {
+                        SDL_Color foodColor = {102, 51, 0, 255}; // Brown for food
+                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, foodColor);
+                    } else {
+                        SDL_Color floorColor = {255, 255, 255, 255}; // White for floor
+                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, floorColor);
+                    }
                 } else {
-                    SDL_Color floorColor = {255, 255, 255, 255}; // White for floor
-                    drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, floorColor);
+                    // Render dark tiles for unexplored areas
+                    SDL_Color blackColor = {0, 0, 0, 255};
+                    drawText(" ", x * TILE_SIZE, y * TILE_SIZE, blackColor);
                 }
             }
         }
@@ -796,7 +1013,7 @@ void renderGame() {
     // Render monsters, only if they are visible
     for (int i = 0; i < MAX_MONSTERS; i++) {
         if (monsters[i].active && monsters[i].x >= cameraX && monsters[i].x < cameraX + visibleMapWidth &&
-            monsters[i].y >= cameraY && monsters[i].y < cameraY + visibleMapHeight) {
+            monsters[i].y >= cameraY && monsters[i].y < cameraY + visibleMapHeight && visibility[monsters[i].y][monsters[i].x]) {
             char monsterChar[2];
             monsterChar[0] = monsters[i].symbol;
             monsterChar[1] = '\0';
@@ -813,8 +1030,9 @@ void renderGame() {
     drawText(playerChar, playerScreenX, playerScreenY, (SDL_Color){0, 255, 0, 255}); // Green for player
 
     // Render player stats at the top of the screen (fixed position)
-    char statsBuffer[200];
-    sprintf(statsBuffer, "HP: %d/%d | Mana: %d/%d | Int: %d | Score: %d | Potions: %d | Level: %d", player.hp, player.maxHp, player.mana, player.maxMana, player.intelligence, player.score, player.healthPotions, dungeonLevel);
+    char statsBuffer[256];
+    sprintf(statsBuffer, "HP: %d/%d | Mana: %d/%d | Int: %d | Score: %d | Potions: %d | Food: %d | Lvl: %d | XP: %d/%d | Dlvl: %d",
+            player.hp, player.maxHp, player.mana, player.maxMana, player.intelligence, player.score, player.healthPotions, player.foodInInventory, player.level, player.xp, player.xpToNextLevel, dungeonLevel);
     drawText(statsBuffer, 10, 10, (SDL_Color){255, 255, 255, 255});
 
     // Render message log at the bottom of the screen (fixed position)
@@ -854,11 +1072,17 @@ void renderGameOverScreen() {
     TTF_SizeText(font, deathMessage, &deathMessageWidth, NULL);
     drawText(deathMessage, (SCREEN_WIDTH - deathMessageWidth) / 2, yOffset + 24, (SDL_Color){255, 255, 255, 255});
 
+    char causeMessage[100];
+    sprintf(causeMessage, "Cause of Death: %s", player.causeOfDeath);
+    int causeMessageWidth;
+    TTF_SizeText(font, causeMessage, &causeMessageWidth, NULL);
+    drawText(causeMessage, (SCREEN_WIDTH - causeMessageWidth) / 2, yOffset + 48, (SDL_Color){255, 255, 255, 255});
+
     char scoreMessage[100];
     sprintf(scoreMessage, "Final Score: %d", player.score);
     int scoreMessageWidth;
     TTF_SizeText(font, scoreMessage, &scoreMessageWidth, NULL);
-    drawText(scoreMessage, (SCREEN_WIDTH - scoreMessageWidth) / 2, yOffset + 48, (SDL_Color){255, 255, 255, 255});
+    drawText(scoreMessage, (SCREEN_WIDTH - scoreMessageWidth) / 2, yOffset + 72, (SDL_Color){255, 255, 255, 255});
 
     SDL_RenderPresent(renderer);
 }
@@ -887,6 +1111,8 @@ void renderHelpScreen() {
     yPos += TILE_SIZE;
     drawText("p: Use Health Potion", xPos, yPos, (SDL_Color){255, 255, 255, 255});
     yPos += TILE_SIZE;
+    drawText("e: Eat Food", xPos, yPos, (SDL_Color){255, 255, 255, 255});
+    yPos += TILE_SIZE;
     drawText("?: Show Help (this screen)", xPos, yPos, (SDL_Color){255, 255, 255, 255});
     yPos += TILE_SIZE * 2;
     drawText("Press ESC to return to the game", xPos, yPos, (SDL_Color){255, 255, 255, 255});
@@ -911,6 +1137,21 @@ void renderWinScreen() {
     TTF_SizeText(font, scoreMessage, &scoreMessageWidth, NULL);
     drawText(scoreMessage, (SCREEN_WIDTH - scoreMessageWidth) / 2, yPos, (SDL_Color){255, 255, 255, 255});
     
+    SDL_RenderPresent(renderer);
+}
+
+void renderLevelUpScreen() {
+    renderGame();
+    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180); // Dark semi-transparent overlay
+    SDL_Rect rect = {0, 0, SCREEN_WIDTH, SCREEN_HEIGHT};
+    SDL_RenderFillRect(renderer, &rect);
+    
+    char message[100];
+    sprintf(message, "Welcome to Level %d!", player.level);
+    int messageWidth;
+    TTF_SizeText(font, message, &messageWidth, NULL);
+    drawText(message, (SCREEN_WIDTH - messageWidth) / 2, SCREEN_HEIGHT / 2, (SDL_Color){0, 255, 0, 255});
     SDL_RenderPresent(renderer);
 }
 
