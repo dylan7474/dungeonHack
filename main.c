@@ -34,14 +34,15 @@ typedef struct {
     int intelligence;
     int score; // Player's score
     int healthPotions; // Number of health potions
+    int foodInInventory; // Food in inventory
     int level; // Player's level
     int xp;    // Player's experience points
     int xpToNextLevel; // XP required for the next level
     int hunger; // Hunger level
     int visibilityRadius; // Radius of visibility
-    int foodInInventory; // Food in inventory
     char causeOfDeath[30]; // What killed the player
     int isStarving; // Flag to prevent repeated starving messages/sounds
+    int turnsToHunger; // How many turns before hunger increases
 } Player;
 
 // Monster attributes
@@ -53,6 +54,7 @@ typedef struct {
     int active; // 1 if active, 0 if defeated
     int speed;  // How many tiles it moves per turn
     int points; // Points awarded for defeating this monster
+    int rangedAttack; // 1 if monster has ranged attack, 0 otherwise
 } Monster;
 
 // Room attributes
@@ -72,15 +74,15 @@ typedef enum {
 
 // Monster templates with scoring
 Monster monsterTemplates[] = {
-    {0, 0, 5, 'g', "Goblin", 1, 2, 10},
-    {0, 0, 15, 'O', "Ogre", 1, 1, 50},
-    {0, 0, 10, 'o', "Orc", 1, 1, 20},
-    {0, 0, 8, 's', "Snake", 1, 3, 15},
-    {0, 0, 25, 'D', "Dragon", 1, 1, 100},
-    {0, 0, 12, 'E', "Poisonous Eye", 1, 2, 40}
+    {0, 0, 5, 'g', "Goblin", 1, 2, 10, 0},
+    {0, 0, 15, 'O', "Ogre", 1, 1, 50, 0},
+    {0, 0, 10, 'o', "Orc", 1, 1, 20, 0},
+    {0, 0, 8, 's', "Snake", 1, 3, 15, 0},
+    {0, 0, 25, 'D', "Dragon", 1, 1, 100, 0},
+    {0, 0, 12, 'E', "Poisonous Eye", 1, 2, 40, 1}
 };
 
-Monster finalBossTemplate = {0, 0, 100, 'L', "Lich Lord", 1, 1, 500};
+Monster finalBossTemplate = {0, 0, 100, 'L', "Lich Lord", 1, 1, 500, 1};
 
 #define NUM_MONSTER_TYPES (sizeof(monsterTemplates) / sizeof(Monster))
 
@@ -94,6 +96,7 @@ char map[MAP_HEIGHT][MAP_WIDTH];
 char messageBuffer[256];
 int messageTimer = 0; // Timer to clear the message log
 int turnCounter = 0; // New turn counter for passive regeneration
+int restCounter = 0; // Counter for resting
 GameState gameState = STATE_PLAYING;
 int isAwaitingSpellDirection = 0; // New flag for magic missile
 int dungeonLevel = 1;
@@ -142,6 +145,7 @@ void fightMonster(int monsterIndex);
 void rest();
 void castHealSpell();
 void castMagicMissile(int dx, int dy);
+void castPhaseDoorSpell();
 void useHealthPotion();
 void renderGame();
 void renderGameOverScreen();
@@ -152,6 +156,7 @@ void drawText(const char* text, int x, int y, SDL_Color color);
 void showMessage(const char* message);
 int getDistance(int x1, int y1, int x2, int y2);
 int isOccupiedByMonster(int x, int y);
+int isTileWalkable(int x, int y);
 void checkLevelUp();
 void updateVisibility();
 void placePotions();
@@ -170,22 +175,20 @@ int main(int argc, char* args[]) {
     player.intelligence = 5;
     player.score = 0;
     player.healthPotions = 0;
+    player.foodInInventory = 10; // Start with 10 food items
     player.level = 1;
     player.xp = 0;
-    player.xpToNextLevel = 100;
+    player.xpToNextLevel = 150; // Increased XP threshold
     player.hunger = 0;
     player.visibilityRadius = 8; // Default visibility radius
-    player.foodInInventory = 10; // Start with 10 food items
     strcpy(player.causeOfDeath, "");
     player.isStarving = 0;
+    player.turnsToHunger = 20;
 
     // Generate the initial dungeon and place monsters
     generateDungeon();
     placeMonsters();
     updateVisibility();
-    
-    // Disable key repeat
-    // SDL_EnableKeyRepeat(0, 0);
 
     int running = 1;
     SDL_Event e;
@@ -636,9 +639,29 @@ int handlePlayingInput(SDL_Event* e) {
                 }
                 break;
             case SDLK_r: // New rest functionality
-                rest();
-                player.hunger += 5; // Resting makes you hungrier
-                return 1; // A turn has passed
+                if (e->key.repeat == 0) {
+                    if (isOccupiedByMonster(player.x-1, player.y) != -1 || isOccupiedByMonster(player.x+1, player.y) != -1 ||
+                        isOccupiedByMonster(player.x, player.y-1) != -1 || isOccupiedByMonster(player.x, player.y+1) != -1) {
+                            showMessage("You can't rest while adjacent to a monster!");
+                            return 0;
+                    }
+                    restCounter++;
+                    if (restCounter >= 5) {
+                        player.hp++;
+                        if (player.hp > player.maxHp) player.hp = player.maxHp;
+                        player.mana++;
+                        if (player.mana > player.maxMana) player.mana = player.maxMana;
+                        restCounter = 0;
+                        showMessage("You have rested and recovered 1 HP and 1 Mana!");
+                    } else {
+                        char tempBuffer[256];
+                        sprintf(tempBuffer, "Resting... (Turn %d/5)", restCounter);
+                        showMessage(tempBuffer);
+                    }
+                    player.hunger += 5; // Resting makes you hungrier
+                    return 1; // A turn has passed
+                }
+                return 0;
             case SDLK_h: // Heal spell
                 castHealSpell();
                 return 1;
@@ -646,6 +669,9 @@ int handlePlayingInput(SDL_Event* e) {
                 isAwaitingSpellDirection = 1;
                 showMessage("Choose a direction for magic missile!");
                 return 0; // No turn passed yet
+            case SDLK_t: // Teleportation spell
+                castPhaseDoorSpell();
+                return 1; // A turn has passed
             case SDLK_e: // Eat food
                 eatFood();
                 return 1;
@@ -802,20 +828,17 @@ void fightMonster(int monsterIndex) {
 // New rest function to recover HP and Mana
 void rest() {
     char tempBuffer[256];
-    int hpRecovered = rand() % 3 + 1; // Recover 1-3 HP
-    int manaRecovered = rand() % 2 + 1; // Recover 1-2 Mana
-
-    player.hp += hpRecovered;
-    if (player.hp > player.maxHp) {
-        player.hp = player.maxHp;
+    restCounter++;
+    if (restCounter >= 5) {
+        player.hp++;
+        if (player.hp > player.maxHp) player.hp = player.maxHp;
+        player.mana++;
+        if (player.mana > player.maxMana) player.mana = player.maxMana;
+        restCounter = 0;
+        sprintf(tempBuffer, "You have rested and recovered 1 HP and 1 Mana!");
+    } else {
+        sprintf(tempBuffer, "Resting... (Turn %d/5)", restCounter);
     }
-
-    player.mana += manaRecovered;
-    if (player.mana > player.maxMana) {
-        player.mana = player.maxMana;
-    }
-
-    sprintf(tempBuffer, "You rest and recover %d HP and %d Mana. Your HP is now %d/%d.", hpRecovered, manaRecovered, player.hp, player.maxMana);
     showMessage(tempBuffer);
 }
 
@@ -891,6 +914,32 @@ void castMagicMissile(int dx, int dy) {
     showMessage(tempBuffer);
 }
 
+// New Phase Door spell
+void castPhaseDoorSpell() {
+    char tempBuffer[256];
+    int manaCost = 5;
+    if (player.mana < manaCost) {
+        sprintf(tempBuffer, "Not enough mana to cast Phase Door!");
+        showMessage(tempBuffer);
+        return;
+    }
+
+    player.mana -= manaCost;
+
+    // Find a random, empty, walkable tile to teleport to
+    int newX, newY;
+    do {
+        newX = rand() % MAP_WIDTH;
+        newY = rand() % MAP_HEIGHT;
+    } while (!isTileWalkable(newX, newY) || isOccupiedByMonster(newX, newY) != -1);
+    
+    player.x = newX;
+    player.y = newY;
+    
+    sprintf(tempBuffer, "You cast Phase Door and teleport to a new location!");
+    showMessage(tempBuffer);
+}
+
 
 // New function to use a health potion
 void useHealthPotion() {
@@ -927,7 +976,7 @@ void checkLevelUp() {
     if (player.xp >= player.xpToNextLevel) {
         player.level++;
         player.xp -= player.xpToNextLevel; // Reset XP for the new level
-        player.xpToNextLevel = player.xpToNextLevel + (player.level * 50); // Increase XP required for the next level
+        player.xpToNextLevel = player.xpToNextLevel * 2; // Increase XP required for the next level
         player.maxHp += 5; // Increase max HP
         player.hp = player.maxHp; // Fully heal on level up
         player.maxMana += 2; // Increase max Mana
@@ -1108,6 +1157,8 @@ void renderHelpScreen() {
     yPos += TILE_SIZE;
     drawText("f + Arrow Key: Cast Magic Missile", xPos, yPos, (SDL_Color){255, 255, 255, 255});
     yPos += TILE_SIZE;
+    drawText("t: Cast Phase Door", xPos, yPos, (SDL_Color){255, 255, 255, 255});
+    yPos += TILE_SIZE;
     drawText("p: Use Health Potion", xPos, yPos, (SDL_Color){255, 255, 255, 255});
     yPos += TILE_SIZE;
     drawText("e: Eat Food", xPos, yPos, (SDL_Color){255, 255, 255, 255});
@@ -1187,4 +1238,12 @@ int isOccupiedByMonster(int x, int y) {
         }
     }
     return -1;
+}
+
+// Check if a tile is walkable (not a wall)
+int isTileWalkable(int x, int y) {
+    if (x >= 0 && x < MAP_WIDTH && y >= 0 && y < MAP_HEIGHT && map[y][x] != '#') {
+        return 1;
+    }
+    return 0;
 }
