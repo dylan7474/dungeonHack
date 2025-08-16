@@ -1,0 +1,21 @@
+# Makefile for Windows (Cross-Compilation)
+CC = x86_64-w64-mingw32-gcc
+TARGET = dungeonHack.exe
+SRCS = main.c
+CFLAGS = -I/usr/x86_64-w64-mingw32/include/SDL2 \
+         -I/usr/x86_64-w64-mingw32/include \
+         -Wall -O2
+
+LDFLAGS = -L/usr/x86_64-w64-mingw32/lib \
+          -lmingw32 -lSDL2main -lSDL2 -lSDL2_ttf -lSDL2_mixer \
+          -lwinmm -lbcrypt -lpthread -lws2_32 -lcrypt32 \
+          -lwldap32 -lgdi32 -limm32 -lole32 \
+          -loleaut32 -lversion -lsetupapi -lm -mwindows -static \
+          -lrpcrt4
+
+all: $(TARGET)
+$(TARGET): $(SRCS)
+	$(CC) $(CFLAGS) $(SRCS) -o $(TARGET) $(LDFLAGS)
+
+clean:
+	rm -f $(TARGET)
