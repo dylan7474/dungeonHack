@@ -856,13 +856,15 @@ void castMagicMissile(int dx, int dy) {
         }
 
         // Update screen to show missile
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
         renderGame();
         drawText("*", (missileX-cameraX)*TILE_SIZE, (missileY-cameraY)*TILE_SIZE, (SDL_Color){255, 255, 0, 255});
         SDL_RenderPresent(renderer);
-        SDL_Delay(50);
+        SDL_Delay(15);
     }
+
+    // Redraw game state without missile
+    renderGame();
+    SDL_RenderPresent(renderer);
 
     showMessage(tempBuffer);
 }
@@ -949,8 +951,18 @@ void checkLevelUp() {
 
 // Mark tiles within the player's sight as explored
 void updateVisibility() {
-    for (int y = 0; y < MAP_HEIGHT; y++) {
-        for (int x = 0; x < MAP_WIDTH; x++) {
+    int startX = player.x - player.visibilityRadius;
+    int endX = player.x + player.visibilityRadius;
+    int startY = player.y - player.visibilityRadius;
+    int endY = player.y + player.visibilityRadius;
+
+    if (startX < 0) startX = 0;
+    if (endX >= MAP_WIDTH) endX = MAP_WIDTH - 1;
+    if (startY < 0) startY = 0;
+    if (endY >= MAP_HEIGHT) endY = MAP_HEIGHT - 1;
+
+    for (int y = startY; y <= endY; y++) {
+        for (int x = startX; x <= endX; x++) {
             if (getDistance(player.x, player.y, x, y) <= player.visibilityRadius) {
                 visibility[y][x] = 1;
             }
