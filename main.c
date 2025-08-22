@@ -7,70 +7,11 @@
 #include <string.h>
 #include <math.h>
 #include "font.h"
-
-// Tile size
-#define TILE_SIZE 24
-
-// Map dimensions - Increased for a larger dungeon
-#define MAP_WIDTH 160
-#define MAP_HEIGHT 50
-
-// Max number of monsters and rooms
-#define MAX_MONSTERS 20
-#define MAX_ROOMS 20
-#define MONSTER_DETECTION_RANGE 8
+#include "game.h"
 
 // Screen dimensions (will be set at runtime)
 int SCREEN_WIDTH;
 int SCREEN_HEIGHT;
-
-// Player attributes
-typedef struct {
-    int x, y;
-    int hp;
-    int maxHp;
-    int mana;
-    int maxMana;
-    int intelligence;
-    int score; // Player's score
-    int healthPotions; // Number of health potions
-    int foodInInventory; // Food in inventory
-    int level; // Player's level
-    int xp;    // Player's experience points
-    int xpToNextLevel; // XP required for the next level
-    int hunger; // Hunger level
-    int visibilityRadius; // Radius of visibility
-    char causeOfDeath[30]; // What killed the player
-    int isStarving; // Flag to prevent repeated starving messages/sounds
-    int turnsToHunger; // How many turns before hunger increases
-} Player;
-
-// Monster attributes
-typedef struct {
-    int x, y;
-    int hp;
-    char symbol;
-    char name[20];
-    int active; // 1 if active, 0 if defeated
-    int speed;  // How many tiles it moves per turn
-    int points; // Points awarded for defeating this monster
-    int rangedAttack; // 1 if monster has ranged attack, 0 otherwise
-} Monster;
-
-// Room attributes
-typedef struct {
-    int x, y;
-    int width, height;
-} Room;
-
-// Game states
-typedef enum {
-    STATE_PLAYING,
-    STATE_HELP,
-    STATE_GAMEOVER,
-    STATE_WIN,
-    STATE_LEVELUP
-} GameState;
 
 // Monster templates with scoring
 Monster monsterTemplates[] = {
@@ -101,8 +42,10 @@ GameState gameState = STATE_PLAYING;
 int isAwaitingSpellDirection = 0; // New flag for magic missile
 int dungeonLevel = 1;
 
-// Fog of War variables
+// Explored tiles: 1 if the player has seen the tile
 int visibility[MAP_HEIGHT][MAP_WIDTH];
+// Tiles visible on the current turn
+int currentVisibility[MAP_HEIGHT][MAP_WIDTH];
 
 // Camera/Viewport position
 int cameraX = 0;
@@ -181,9 +124,9 @@ int main(int argc, char* args[]) {
     player.xpToNextLevel = 150; // Increased XP threshold
     player.hunger = 0;
     player.visibilityRadius = 8; // Default visibility radius
-    strcpy(player.causeOfDeath, "");
+    player.causeOfDeath[0] = '\0';
     player.isStarving = 0;
-    player.turnsToHunger = 20;
+    player.turnsToHunger = HUNGER_TURN_THRESHOLD;
 
     // Generate the initial dungeon and place monsters
     generateDungeon();
@@ -231,7 +174,7 @@ int main(int argc, char* args[]) {
                 
                 // Hunger mechanic
                 player.hunger++;
-                if (player.hunger >= 200) {
+                if (player.hunger >= HUNGER_STARVING) {
                     player.hp--;
                     if (player.isStarving == 0) {
                         Mix_PlayChannel(-1, beepSound, 0); // Play beep once
@@ -244,7 +187,7 @@ int main(int argc, char* args[]) {
 
                 // Passive regeneration
                 turnCounter++;
-                if (turnCounter >= 5) {
+                if (turnCounter >= PASSIVE_REGEN_INTERVAL) {
                     if (player.hp < player.maxHp) {
                         player.hp++;
                     }
@@ -263,7 +206,8 @@ int main(int argc, char* args[]) {
         // Check for game over or win condition
         if (player.hp <= 0 && gameState != STATE_GAMEOVER) {
             gameState = STATE_GAMEOVER;
-            strcpy(player.causeOfDeath, "starvation");
+            strncpy(player.causeOfDeath, "starvation", sizeof(player.causeOfDeath) - 1);
+            player.causeOfDeath[sizeof(player.causeOfDeath) - 1] = '\0';
         }
         
         // Win condition: dungeon level 5 and the boss is defeated
@@ -451,10 +395,11 @@ void generateDungeon() {
         map[stairsY][stairsX] = '>';
     }
     
-    // Initialize visibility map
+    // Initialize visibility maps
     for (int y = 0; y < MAP_HEIGHT; y++) {
         for (int x = 0; x < MAP_WIDTH; x++) {
             visibility[y][x] = 0;
+            currentVisibility[y][x] = 0;
         }
     }
 }
@@ -646,7 +591,7 @@ int handlePlayingInput(SDL_Event* e) {
                             return 0;
                     }
                     restCounter++;
-                    if (restCounter >= 5) {
+                    if (restCounter >= REST_TURNS_REQUIRED) {
                         player.hp++;
                         if (player.hp > player.maxHp) player.hp = player.maxHp;
                         player.mana++;
@@ -655,7 +600,7 @@ int handlePlayingInput(SDL_Event* e) {
                         showMessage("You have rested and recovered 1 HP and 1 Mana!");
                     } else {
                         char tempBuffer[256];
-                        sprintf(tempBuffer, "Resting... (Turn %d/5)", restCounter);
+                        snprintf(tempBuffer, sizeof(tempBuffer), "Resting... (Turn %d/%d)", restCounter, REST_TURNS_REQUIRED);
                         showMessage(tempBuffer);
                     }
                     player.hunger += 5; // Resting makes you hungrier
@@ -760,13 +705,17 @@ void moveMonsters() {
                     // Prioritize movement on the axis with the greater distance
                     if (abs(dx) > abs(dy)) {
                         newX += (dx > 0) ? 1 : -1;
-                        if (map[newY][newX] != '#' && (newX != player.x || newY != player.y) && isOccupiedByMonster(newX, newY) == -1) {
+                        if (newX >= 0 && newX < MAP_WIDTH && newY >= 0 && newY < MAP_HEIGHT &&
+                            map[newY][newX] != '#' && (newX != player.x || newY != player.y) &&
+                            isOccupiedByMonster(newX, newY) == -1) {
                             monsters[i].x = newX;
                             moved = 1;
                         }
                     } else {
                         newY += (dy > 0) ? 1 : -1;
-                        if (map[newY][newX] != '#' && (newX != player.x || newY != player.y) && isOccupiedByMonster(newX, newY) == -1) {
+                        if (newX >= 0 && newX < MAP_WIDTH && newY >= 0 && newY < MAP_HEIGHT &&
+                            map[newY][newX] != '#' && (newX != player.x || newY != player.y) &&
+                            isOccupiedByMonster(newX, newY) == -1) {
                             monsters[i].y = newY;
                             moved = 1;
                         }
@@ -776,12 +725,18 @@ void moveMonsters() {
                     if (!moved) {
                         if (abs(dx) > abs(dy)) {
                             newY = monsters[i].y + ((dy > 0) ? 1 : -1);
-                            if (map[newY][monsters[i].x] != '#' && (monsters[i].x != player.x || newY != player.y) && isOccupiedByMonster(monsters[i].x, newY) == -1) {
+                            if (newY >= 0 && newY < MAP_HEIGHT &&
+                                map[newY][monsters[i].x] != '#' &&
+                                (monsters[i].x != player.x || newY != player.y) &&
+                                isOccupiedByMonster(monsters[i].x, newY) == -1) {
                                 monsters[i].y = newY;
                             }
                         } else {
                             newX = monsters[i].x + ((dx > 0) ? 1 : -1);
-                            if (map[monsters[i].y][newX] != '#' && (newX != player.x || monsters[i].y != player.y) && isOccupiedByMonster(newX, monsters[i].y) == -1) {
+                            if (newX >= 0 && newX < MAP_WIDTH &&
+                                map[monsters[i].y][newX] != '#' &&
+                                (newX != player.x || monsters[i].y != player.y) &&
+                                isOccupiedByMonster(newX, monsters[i].y) == -1) {
                                 monsters[i].x = newX;
                             }
                         }
@@ -798,7 +753,7 @@ void fightMonster(int monsterIndex) {
     char tempBuffer[256];
     int playerDamage = rand() % (player.intelligence * 2) + 1;
     monsters[monsterIndex].hp -= playerDamage;
-    sprintf(tempBuffer, "You hit the %s for %d damage!", monsters[monsterIndex].name, playerDamage);
+    snprintf(tempBuffer, sizeof(tempBuffer), "You hit the %s for %d damage!", monsters[monsterIndex].name, playerDamage);
     showMessage(tempBuffer);
 
     if (monsters[monsterIndex].hp <= 0) {
@@ -808,9 +763,9 @@ void fightMonster(int monsterIndex) {
         // 50% chance to drop a food item
         if (rand() % 2 == 0) {
             player.foodInInventory++;
-            sprintf(tempBuffer, "You defeated the %s and found some food!", monsters[monsterIndex].name);
+            snprintf(tempBuffer, sizeof(tempBuffer), "You defeated the %s and found some food!", monsters[monsterIndex].name);
         } else {
-            sprintf(tempBuffer, "You defeated the %s!", monsters[monsterIndex].name);
+            snprintf(tempBuffer, sizeof(tempBuffer), "You defeated the %s!", monsters[monsterIndex].name);
         }
         monsters[monsterIndex].active = 0;
         showMessage(tempBuffer);
@@ -818,9 +773,10 @@ void fightMonster(int monsterIndex) {
         int monsterDamage = rand() % (5 + dungeonLevel) + 1; // Monsters do 1-5 damage + dungeon level
         player.hp -= monsterDamage;
         if (player.hp <= 0) {
-            strcpy(player.causeOfDeath, monsters[monsterIndex].name);
+            strncpy(player.causeOfDeath, monsters[monsterIndex].name, sizeof(player.causeOfDeath) - 1);
+            player.causeOfDeath[sizeof(player.causeOfDeath) - 1] = '\0';
         }
-        sprintf(tempBuffer, "The %s hits you for %d damage! Your HP is now %d/%d.", monsters[monsterIndex].name, monsterDamage, player.hp, player.maxHp);
+        snprintf(tempBuffer, sizeof(tempBuffer), "The %s hits you for %d damage! Your HP is now %d/%d.", monsters[monsterIndex].name, monsterDamage, player.hp, player.maxHp);
         showMessage(tempBuffer);
     }
 }
@@ -829,15 +785,15 @@ void fightMonster(int monsterIndex) {
 void rest() {
     char tempBuffer[256];
     restCounter++;
-    if (restCounter >= 5) {
+    if (restCounter >= REST_TURNS_REQUIRED) {
         player.hp++;
         if (player.hp > player.maxHp) player.hp = player.maxHp;
         player.mana++;
         if (player.mana > player.maxMana) player.mana = player.maxMana;
         restCounter = 0;
-        sprintf(tempBuffer, "You have rested and recovered 1 HP and 1 Mana!");
+        snprintf(tempBuffer, sizeof(tempBuffer), "You have rested and recovered 1 HP and 1 Mana!");
     } else {
-        sprintf(tempBuffer, "Resting... (Turn %d/5)", restCounter);
+        snprintf(tempBuffer, sizeof(tempBuffer), "Resting... (Turn %d/%d)", restCounter, REST_TURNS_REQUIRED);
     }
     showMessage(tempBuffer);
 }
@@ -853,9 +809,9 @@ void castHealSpell() {
         if (player.hp > player.maxHp) {
             player.hp = player.maxHp;
         }
-        sprintf(tempBuffer, "You cast a healing spell and recover %d HP!", healAmount);
+        snprintf(tempBuffer, sizeof(tempBuffer), "You cast a healing spell and recover %d HP!", healAmount);
     } else {
-        sprintf(tempBuffer, "Not enough mana to cast the healing spell!");
+        snprintf(tempBuffer, sizeof(tempBuffer), "Not enough mana to cast the healing spell!");
     }
     showMessage(tempBuffer);
 }
@@ -865,7 +821,7 @@ void castMagicMissile(int dx, int dy) {
     char tempBuffer[256];
     int manaCost = 2;
     if (player.mana < manaCost) {
-        sprintf(tempBuffer, "Not enough mana to cast magic missile!");
+        snprintf(tempBuffer, sizeof(tempBuffer), "Not enough mana to cast magic missile!");
         showMessage(tempBuffer);
         return;
     }
@@ -882,7 +838,7 @@ void castMagicMissile(int dx, int dy) {
 
         // Check for collision with wall or map boundaries
         if (missileX < 0 || missileX >= MAP_WIDTH || missileY < 0 || missileY >= MAP_HEIGHT || map[missileY][missileX] == '#') {
-            sprintf(tempBuffer, "The magic missile hits a wall!");
+            snprintf(tempBuffer, sizeof(tempBuffer), "The magic missile hits a wall!");
             break;
         }
 
@@ -891,12 +847,12 @@ void castMagicMissile(int dx, int dy) {
         if (monsterIndex != -1) {
             int damage = rand() % 5 + 1 + player.intelligence;
             monsters[monsterIndex].hp -= damage;
-            sprintf(tempBuffer, "You cast magic missile at the %s for %d damage!", monsters[monsterIndex].name, damage);
+            snprintf(tempBuffer, sizeof(tempBuffer), "You cast magic missile at the %s for %d damage!", monsters[monsterIndex].name, damage);
             if (monsters[monsterIndex].hp <= 0) {
                 player.score += monsters[monsterIndex].points;
                 player.xp += monsters[monsterIndex].points; // Gain XP for defeating a monster
                 
-                sprintf(tempBuffer, "You defeated the %s!", monsters[monsterIndex].name);
+                snprintf(tempBuffer, sizeof(tempBuffer), "You defeated the %s!", monsters[monsterIndex].name);
                 monsters[monsterIndex].active = 0;
             }
             break;
@@ -919,7 +875,7 @@ void castPhaseDoorSpell() {
     char tempBuffer[256];
     int manaCost = 5;
     if (player.mana < manaCost) {
-        sprintf(tempBuffer, "Not enough mana to cast Phase Door!");
+        snprintf(tempBuffer, sizeof(tempBuffer), "Not enough mana to cast Phase Door!");
         showMessage(tempBuffer);
         return;
     }
@@ -928,15 +884,22 @@ void castPhaseDoorSpell() {
 
     // Find a random, empty, walkable tile to teleport to
     int newX, newY;
+    int attempts = 0;
     do {
         newX = rand() % MAP_WIDTH;
         newY = rand() % MAP_HEIGHT;
+        attempts++;
+        if (attempts > 1000) {
+            snprintf(tempBuffer, sizeof(tempBuffer), "The spell fails to find a safe location!");
+            showMessage(tempBuffer);
+            return;
+        }
     } while (!isTileWalkable(newX, newY) || isOccupiedByMonster(newX, newY) != -1);
     
     player.x = newX;
     player.y = newY;
     
-    sprintf(tempBuffer, "You cast Phase Door and teleport to a new location!");
+    snprintf(tempBuffer, sizeof(tempBuffer), "You cast Phase Door and teleport to a new location!");
     showMessage(tempBuffer);
 }
 
@@ -951,9 +914,9 @@ void useHealthPotion() {
         if (player.hp > player.maxHp) {
             player.hp = player.maxHp;
         }
-        sprintf(tempBuffer, "You use a health potion and recover %d HP!", healAmount);
+        snprintf(tempBuffer, sizeof(tempBuffer), "You use a health potion and recover %d HP!", healAmount);
     } else {
-        sprintf(tempBuffer, "You have no health potions!");
+        snprintf(tempBuffer, sizeof(tempBuffer), "You have no health potions!");
     }
     showMessage(tempBuffer);
 }
@@ -964,9 +927,9 @@ void eatFood() {
     if (player.foodInInventory > 0) {
         player.foodInInventory--;
         player.hunger = 0;
-        sprintf(tempBuffer, "You eat the food and are no longer hungry!");
+        snprintf(tempBuffer, sizeof(tempBuffer), "You eat the food and are no longer hungry!");
     } else {
-        sprintf(tempBuffer, "You have no food!");
+        snprintf(tempBuffer, sizeof(tempBuffer), "You have no food!");
     }
     showMessage(tempBuffer);
 }
@@ -987,12 +950,25 @@ void checkLevelUp() {
     }
 }
 
-// Update the visibility map based on the player's position
+// Mark tiles within the player's sight as explored and currently visible
 void updateVisibility() {
-    for (int y = 0; y < MAP_HEIGHT; y++) {
-        for (int x = 0; x < MAP_WIDTH; x++) {
+    memset(currentVisibility, 0, sizeof(currentVisibility));
+
+    int startX = player.x - player.visibilityRadius;
+    int endX = player.x + player.visibilityRadius;
+    int startY = player.y - player.visibilityRadius;
+    int endY = player.y + player.visibilityRadius;
+
+    if (startX < 0) startX = 0;
+    if (startY < 0) startY = 0;
+    if (endX >= MAP_WIDTH) endX = MAP_WIDTH - 1;
+    if (endY >= MAP_HEIGHT) endY = MAP_HEIGHT - 1;
+
+    for (int y = startY; y <= endY; y++) {
+        for (int x = startX; x <= endX; x++) {
             if (getDistance(player.x, player.y, x, y) <= player.visibilityRadius) {
                 visibility[y][x] = 1;
+                currentVisibility[y][x] = 1;
             }
         }
     }
@@ -1032,23 +1008,22 @@ void renderGame() {
                     tileChar[0] = map[mapY][mapX];
                     tileChar[1] = '\0';
 
-                    // Set color based on tile type
+                    int currentlyVisible = currentVisibility[mapY][mapX];
+                    SDL_Color color;
+
                     if (map[mapY][mapX] == '#') {
-                        SDL_Color wallColor = {100, 100, 100, 255}; // Gray for walls
-                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, wallColor);
+                        color = currentlyVisible ? (SDL_Color){100, 100, 100, 255} : (SDL_Color){50, 50, 50, 255};
                     } else if (map[mapY][mapX] == '>') {
-                        SDL_Color stairsColor = {255, 255, 0, 255}; // Yellow for stairs
-                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, stairsColor);
+                        color = currentlyVisible ? (SDL_Color){255, 255, 0, 255} : (SDL_Color){128, 128, 0, 255};
                     } else if (map[mapY][mapX] == '!') {
-                        SDL_Color potionColor = {0, 255, 255, 255}; // Cyan for potions
-                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, potionColor);
+                        color = currentlyVisible ? (SDL_Color){0, 255, 255, 255} : (SDL_Color){0, 128, 128, 255};
                     } else if (map[mapY][mapX] == 'F') {
-                        SDL_Color foodColor = {102, 51, 0, 255}; // Brown for food
-                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, foodColor);
+                        color = currentlyVisible ? (SDL_Color){102, 51, 0, 255} : (SDL_Color){51, 25, 0, 255};
                     } else {
-                        SDL_Color floorColor = {255, 255, 255, 255}; // White for floor
-                        drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, floorColor);
+                        color = currentlyVisible ? (SDL_Color){255, 255, 255, 255} : (SDL_Color){150, 150, 150, 255};
                     }
+
+                    drawText(tileChar, x * TILE_SIZE, y * TILE_SIZE, color);
                 } else {
                     // Render dark tiles for unexplored areas
                     SDL_Color blackColor = {0, 0, 0, 255};
@@ -1058,10 +1033,11 @@ void renderGame() {
         }
     }
 
-    // Render monsters, only if they are visible
+    // Render monsters, only if they are currently within sight
     for (int i = 0; i < MAX_MONSTERS; i++) {
         if (monsters[i].active && monsters[i].x >= cameraX && monsters[i].x < cameraX + visibleMapWidth &&
-            monsters[i].y >= cameraY && monsters[i].y < cameraY + visibleMapHeight && visibility[monsters[i].y][monsters[i].x]) {
+            monsters[i].y >= cameraY && monsters[i].y < cameraY + visibleMapHeight &&
+            currentVisibility[monsters[i].y][monsters[i].x]) {
             char monsterChar[2];
             monsterChar[0] = monsters[i].symbol;
             monsterChar[1] = '\0';
@@ -1079,7 +1055,7 @@ void renderGame() {
 
     // Render player stats at the top of the screen (fixed position)
     char statsBuffer[256];
-    sprintf(statsBuffer, "HP: %d/%d | Mana: %d/%d | Int: %d | Score: %d | Potions: %d | Food: %d | Lvl: %d | XP: %d/%d | Dlvl: %d",
+    snprintf(statsBuffer, sizeof(statsBuffer), "HP: %d/%d | Mana: %d/%d | Int: %d | Score: %d | Potions: %d | Food: %d | Lvl: %d | XP: %d/%d | Dlvl: %d",
             player.hp, player.maxHp, player.mana, player.maxMana, player.intelligence, player.score, player.healthPotions, player.foodInInventory, player.level, player.xp, player.xpToNextLevel, dungeonLevel);
     drawText(statsBuffer, 10, 10, (SDL_Color){255, 255, 255, 255});
 
@@ -1102,7 +1078,8 @@ void renderGameOverScreen() {
 
     char* line;
     char tombstoneCopy[256];
-    strcpy(tombstoneCopy, tombstone);
+    strncpy(tombstoneCopy, tombstone, sizeof(tombstoneCopy) - 1);
+    tombstoneCopy[sizeof(tombstoneCopy) - 1] = '\0';
     
     int yOffset = 100;
     line = strtok(tombstoneCopy, "\n");
@@ -1115,19 +1092,19 @@ void renderGameOverScreen() {
     }
 
     char deathMessage[100];
-    sprintf(deathMessage, "You have died!");
+    snprintf(deathMessage, sizeof(deathMessage), "You have died!");
     int deathMessageWidth;
     TTF_SizeText(font, deathMessage, &deathMessageWidth, NULL);
     drawText(deathMessage, (SCREEN_WIDTH - deathMessageWidth) / 2, yOffset + 24, (SDL_Color){255, 255, 255, 255});
 
     char causeMessage[100];
-    sprintf(causeMessage, "Cause of Death: %s", player.causeOfDeath);
+    snprintf(causeMessage, sizeof(causeMessage), "Cause of Death: %s", player.causeOfDeath);
     int causeMessageWidth;
     TTF_SizeText(font, causeMessage, &causeMessageWidth, NULL);
     drawText(causeMessage, (SCREEN_WIDTH - causeMessageWidth) / 2, yOffset + 48, (SDL_Color){255, 255, 255, 255});
 
     char scoreMessage[100];
-    sprintf(scoreMessage, "Final Score: %d", player.score);
+    snprintf(scoreMessage, sizeof(scoreMessage), "Final Score: %d", player.score);
     int scoreMessageWidth;
     TTF_SizeText(font, scoreMessage, &scoreMessageWidth, NULL);
     drawText(scoreMessage, (SCREEN_WIDTH - scoreMessageWidth) / 2, yOffset + 72, (SDL_Color){255, 255, 255, 255});
@@ -1182,7 +1159,7 @@ void renderWinScreen() {
     yPos += TILE_SIZE;
 
     char scoreMessage[100];
-    sprintf(scoreMessage, "Final Score: %d", player.score);
+    snprintf(scoreMessage, sizeof(scoreMessage), "Final Score: %d", player.score);
     int scoreMessageWidth;
     TTF_SizeText(font, scoreMessage, &scoreMessageWidth, NULL);
     drawText(scoreMessage, (SCREEN_WIDTH - scoreMessageWidth) / 2, yPos, (SDL_Color){255, 255, 255, 255});
@@ -1198,7 +1175,7 @@ void renderLevelUpScreen() {
     SDL_RenderFillRect(renderer, &rect);
     
     char message[100];
-    sprintf(message, "Welcome to Level %d!", player.level);
+    snprintf(message, sizeof(message), "Welcome to Level %d!", player.level);
     int messageWidth;
     TTF_SizeText(font, message, &messageWidth, NULL);
     drawText(message, (SCREEN_WIDTH - messageWidth) / 2, SCREEN_HEIGHT / 2, (SDL_Color){0, 255, 0, 255});
