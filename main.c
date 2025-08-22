@@ -856,13 +856,18 @@ void castMagicMissile(int dx, int dy) {
         }
 
         // Update screen to show missile
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
         renderGame();
-        drawText("*", (missileX-cameraX)*TILE_SIZE, (missileY-cameraY)*TILE_SIZE, (SDL_Color){255, 255, 0, 255});
+        drawText("*", (missileX - cameraX) * TILE_SIZE, (missileY - cameraY) * TILE_SIZE,
+                 (SDL_Color){255, 255, 0, 255});
         SDL_RenderPresent(renderer);
         SDL_Delay(15);
     }
 
     // Redraw game state without missile
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
     renderGame();
     SDL_RenderPresent(renderer);
 
